@@ -209,6 +209,8 @@ __marimo__/
 # additional
 dataset
 output
+outputs
+*.pt
 *_ckpt
 *.zip
 *.exe
@@ -218,3 +220,4 @@ logs
 __pycache__
 clouds
 .DS_Store
+configs/api_keys.ini

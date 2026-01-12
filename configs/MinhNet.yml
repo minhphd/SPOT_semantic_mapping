@@ -1,0 +1,224 @@
+device: cuda
+
+# -----------------------------
+# Paths
+# -----------------------------
+paths:  
+  output_dir: "outputs/"
+  data_dir: "dataset/dataset/iphone/3578aa5730"
+
+  siglip_ckpt: "google/siglip-base-patch16-384"
+  siglip2_ckpt: "google/siglip2-base-patch16-384"
+  blip_ckpt: "Salesforce/blip2-flan-t5-xl"
+  yolo11_ckpt: "./Model/weights/yolo11n-seg.pt"
+  yolo8_ckpt: "./Model/weights/yolov8l-world.pt"
+  fastsam_ckpt: "./Model/weights/FastSAM-s.pt"
+  mobile_sam_ckpt: "./Model/weights/mobile_sam.pt"
+  sam2_ckpt: "./Model/weights/sam2.1_b.pt"
+
+# -----------------------------
+# Camera / Geometry
+# -----------------------------
+camera:
+  depth_width: 256
+  depth_height: 192
+  rgb_width: 1920
+  rgb_height: 1440
+  max_depth: 20.0
+
+projection:
+  min_confidence: 2
+  min_depth: 0.1
+
+# -----------------------------
+# Segmentation
+# -----------------------------
+segmentation:
+  detector: "yolov8"
+  sam_backend: "mobilesam"
+  max_masks: 60
+  mask_merge_iou: 0.7
+  crop_padding: 2
+  min_confidence: 0.25
+  min_mask_area_percent: 0.1   # min mask area as percent of image area
+  downscale_factor: 2
+
+# -----------------------------
+# Tracking (Object Layer)
+# -----------------------------
+floor_map:
+
+tracking:
+  w_geo: 1
+  w_sem: 1
+  iou_min: 0.2
+  sim_min: 0.3
+  score_min: 0.3
+  max_center_dist: 2.0
+  # match_dist_thresh: 0.6
+  match_threshold: 1.2
+  weight_dist: 3.0
+  weight_visual: 1.0
+  min_points: 30
+  top_k_crops: 5    # store K largest crops
+  voxel_size: 0.02
+
+dbscan:
+  eps: 0.1
+  min_samples: 10
+
+# -----------------------------
+# Loop Closure (Object-level)
+# -----------------------------
+loop_closure:
+  vision_thresh: 0.4
+  dist_thresh: 0.4
+  merge_score_min: 0.0
+
+# -----------------------------
+# Semantics
+# -----------------------------
+openset:
+  classes:
+    - "chair"
+    - "table"
+    - "desk"
+    - "sofa"
+    - "bed"
+    - "bookshelf"
+    - "cabinet"
+    - "monitor"
+    - "tv"
+    - "computer"
+    - "laptop"
+    - "fan"
+    - "lamp"
+    - "plant"
+    - "pillow"
+    - "mirror"
+    - "bottle"
+    - "cup"
+    - "backpack"
+    - "bag"
+    - "trash bin"
+    - "door"
+    - "window"
+    - "stairs"
+    - "wall"
+    - "floor"
+    - "ceiling"
+    - "unknown object"
+
+landmarks:
+  classes:
+    # --- Architectural Structures ---
+    - wall
+    - corner
+    - doorway
+    - doorframe
+    - window
+    - window_frame
+    - ceiling
+    - floor
+    - staircase
+    - hallway_opening
+    - archway
+
+    # --- Large Fixed Furniture ---
+    - sofa
+    - couch
+    - bed
+    - mattress
+    - bookshelf
+    - cabinet
+    - wardrobe
+    - dresser
+    - dining_table
+    - kitchen_counter
+    - kitchen_island
+    - desk
+    - tv_stand
+    - radiator
+    - sink
+    - fridge
+    - oven
+    - stove
+
+    # --- Large Containers / Regions ---
+    - closet
+    - bathroom_sink
+    - bathtub
+    - shower
+    - toilet
+    - kitchen_sink
+    - laundry_machine
+
+    # --- Vertical Navigational Anchors ---
+    - pillar
+    - column
+    - structural_post
+
+    # --- Room Definition Helpers ---
+    - mirror
+    - curtain
+    - large_painting
+    - large_poster
+    - whiteboard
+    - chalkboard
+
+# -----------------------------
+# Relations
+# -----------------------------
+relations:
+  near_dist: 0.6
+  support_height_thresh: 0.05
+  on_xy_overlap: 0.25
+
+# -----------------------------
+# TSDF (optional)
+# -----------------------------
+tsdf:
+  enabled: false
+  voxel_length: 0.02
+  sdf_trunc: 0.06
+  depth_trunc: 3.0
+
+# -----------------------------
+# Visualization / Debug
+# -----------------------------
+debug:
+  save_crops: true
+  save_fused_crops: true
+  vis_point_cloud: true
+  vis_bounding_boxes: true
+  vis_relations: false
+
+# -----------------------------
+# Pipeline / Frame Sampling
+# -----------------------------
+pipeline:
+  # resume_from_checkpoint: null
+  resume_from_checkpoint: "outputs/great_extraction/checkpoints"  # path to checkpoint to resume from, or null to start fresh
+  use_every_n_frames: 4
+  max_frames: -1   # -1 to use all frames
+
+rooms:
+  room_eps: 2.0            # DBSCAN epsilon for room clustering (meters)
+  room_min_samples: 3      # DBSCAN min_samples for clustering rooms
+
+  door_eps: 0.5            # DBSCAN epsilon for door clustering
+  door_min_samples: 30     # DBSCAN min_samples for door clusters
+
+
+logging:
+  gpu_log_interval: 1000
+  log_dir: "logs/"
+  checkpoint_every: 2500
+
+projection:
+  canvas_width: 500
+  canvas_height: 500
+  x_min: -5.0
+  z_min: -5.0
+  resolution: 0.01 # meters per pixel
+  min_confidence: 2

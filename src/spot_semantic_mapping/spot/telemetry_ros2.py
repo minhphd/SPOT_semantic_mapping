@@ -6,7 +6,6 @@ from rclpy.node import Node
 from std_msgs.msg import Header
 from sensor_msgs.msg import Image, BatteryState
 from geometry_msgs.msg import PoseStamped, TwistStamped
-from cv_bridge import CvBridge
 from agent import SpotAgent
 from sensor_msgs.msg import Image as RosImage
 
@@ -48,7 +47,6 @@ class SpotObservationPublisher(Node):
     def __init__(self, spot_agent, publish_rate_hz=5.0):
         super().__init__("spot_observation_publisher")
         self.agent = spot_agent
-        self.bridge = CvBridge()
 
         # --- pubs ---
         self.pub_pose = self.create_publisher(PoseStamped, "/spot/pose", 10)

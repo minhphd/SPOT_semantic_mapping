@@ -14,6 +14,7 @@ import re
 import numpy as np
 import json
 from pathlib import Path
+from spot_semantic_mapping.spot.decoding import decode_rgb, decode_depth
 
 
 def authenticate_from_file(robot, cred_path: str):
@@ -49,7 +50,7 @@ class SpotAgent:
         
         self.sdk = bosdyn.client.create_standard_sdk("spot_agent")
         self.robot = self.sdk.create_robot(hostname)
-        authenticate_from_file(self.robot, "./configs/spot_credentials.json")
+        authenticate_from_file(self.robot, "./src/configs/spot_credentials.json")
         
         # clients
         self.image_client = self.robot.ensure_client('image')

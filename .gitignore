@@ -207,17 +207,19 @@ marimo/_lsp/
 __marimo__/
 
 # additional
-dataset
-output
-outputs
-*.pt
-*_ckpt
-*.zip
-*.exe
-logs
-2ebf66b16d
-0777a79106
+.devcontainer
+src/configs/
+data/
+logs/
+src/models/weights
+src/spot_semantic_mapping/localization/methods.py/VPR_im2im/cache
+src/spot_semantic_mapping/localization/methods.py/VPR_im2im/dataset
+outputs/
+medias/
 __pycache__
 clouds
 .DS_Store
 configs/api_keys.ini
+configs/spot_credentials.json
+*.pkl
+*.npy

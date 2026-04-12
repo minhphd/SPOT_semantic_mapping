@@ -156,8 +156,13 @@ def save_results_csv(results: dict[str, dict], output_path: str):
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    fieldnames = ["method", "N", "acc_3m", "acc_5m", "room_acc",
+    fieldnames = ["method", "N",
+                  "r@1", "r@3", "r@5", "r@10",
+                  "acc_3m", "acc_5m", "room_acc",
                   "mean_err_m", "median_err_m", "room_acc_N"]
+
+    def _fmt(v):
+        return f"{v:.2f}" if not np.isnan(v) else "nan"
 
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -166,9 +171,13 @@ def save_results_csv(results: dict[str, dict], output_path: str):
             writer.writerow({
                 "method":       method,
                 "N":            r["N"],
+                "r@1":          _fmt(r.get("r@1",  float("nan"))),
+                "r@3":          _fmt(r.get("r@3",  float("nan"))),
+                "r@5":          _fmt(r.get("r@5",  float("nan"))),
+                "r@10":         _fmt(r.get("r@10", float("nan"))),
                 "acc_3m":       f"{r['acc_3m']:.2f}",
                 "acc_5m":       f"{r['acc_5m']:.2f}",
-                "room_acc":     f"{r['room_acc']:.2f}" if not np.isnan(r["room_acc"]) else "nan",
+                "room_acc":     _fmt(r["room_acc"]),
                 "mean_err_m":   f"{r['mean_err_m']:.3f}",
                 "median_err_m": f"{r['median_err_m']:.3f}",
                 "room_acc_N":   r["room_acc_N"],

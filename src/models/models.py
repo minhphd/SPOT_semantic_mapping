@@ -275,7 +275,11 @@ class SiglipModel():
         return feats.cpu().numpy()
 
     def embed_images_by_patch(self, crops_pil):
-        """Return per-patch features (B, H_p, W_p, D) — mirrors DinoModel.embed_images_by_patch."""
+        """Return per-patch features (B, H_p, W_p, D) — mirrors DinoModel.embed_images_by_patch.
+
+        Note: SigLIP has no CLS token — last_hidden_state is already all patch tokens,
+        so we do NOT skip index 0 (unlike DINOv2 where token 0 is CLS).
+        """
         if len(crops_pil) == 0:
             return None
 
@@ -285,7 +289,7 @@ class SiglipModel():
             patch_size = self.model.config.vision_config.patch_size
             img_size   = self.model.config.vision_config.image_size
             n = img_size // patch_size
-            # last_hidden_state: (B, 1 + n*n, D) — index 0 is CLS, rest are patches
+            # SigLIP: last_hidden_state is (B, n*n, D) — all tokens are patches, no CLS
             patch_feats = vision_outputs.last_hidden_state    # (B, n*n, D)
             patch_feats = patch_feats.unflatten(1, (n, n))             # (B, n, n, D)
 

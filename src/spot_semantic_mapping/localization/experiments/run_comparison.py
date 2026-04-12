@@ -1,33 +1,32 @@
 """
 run_comparison.py
 =================
-Paper experiment: compare 11 localization methods across three families on
+Paper experiment: compare 10 localization methods across three families on
 the SPOT indoor dataset.
 
 Families & methods
 ------------------
-graph2graph
-  - ot_gw          : Gromov-Wasserstein matching between YOLO query-graph and DB subgraph
-  - bag_of_objects  : YOLO crop SigLIP embeddings vs node clip_ft  (Sinkhorn OT)
-  - bag_of_texts    : YOLO class-name text embeddings vs node text_ft (Sinkhorn OT)
-
-im2graph
-  - clip_avg        : SigLIP image CLS vs average of nearby DB node clip_ft
-  - clip_max        : SigLIP image CLS vs max-similarity nearby DB node clip_ft
-  - dino_graph      : DINO CLS vs nearby DB node clip_ft (cross-modal baseline)
-
-im2im (→ position via image retrieval)
+im2im (→ position via image retrieval over DB frames)
   - dino_cls        : DINOv2 CLS cosine retrieval
   - clip_cls        : SigLIP CLS cosine retrieval
   - dino_vlad       : DinoVLAD (AnyLoc) — patch VLAD
   - clip_vlad       : ClipVLAD — SigLIP patch VLAD
-  - snap_loc        : DinoVLAD + graph re-scoring (SnapLoc)
+  - snap_loc        : DinoVLAD + SigLIP graph re-scoring (SnapLoc)
+
+im2graph (→ position via query image vs ALL scene-graph node embeddings)
+  - clip_avg        : avg-views SigLIP CLS cosine sim vs all node clip_ft
+  - clip_max        : max-over-views SigLIP CLS cosine sim vs all node clip_ft
+
+graph2graph (→ position via YOLO detections vs ALL scene-graph node embeddings, OT)
+  - bag_of_objects  : YOLO crop SigLIP embs vs all node clip_ft (Sinkhorn OT)
+  - bag_of_texts    : YOLO class-name text embs vs all node text_ft (Sinkhorn OT)
+  - ot_gw           : Gromov-Wasserstein structural matching
 
 Metrics
 -------
-- 3m accuracy  : % timesteps where predicted pos is within 3 m of GT
-- 5m accuracy  : % timesteps where predicted pos is within 5 m of GT
-- room accuracy: % timesteps where top-1 DB frame's room matches GT room
+- R@1 / R@3 / R@5 / R@10 : retrieval recall (im2im only)
+- 3m / 5m accuracy        : % timesteps with predicted pos within 3 / 5 m of GT
+- room accuracy            : top-1 retrieved frame/node's room matches GT room
 - mean / median position error (m)
 
 Usage
@@ -88,13 +87,16 @@ except ImportError:
 # ── constants ─────────────────────────────────────────────────────────────────
 ALL_METHODS = [
     "dino_cls", "clip_cls", "dino_vlad", "clip_vlad", "snap_loc",
-    "clip_avg", "clip_max", "dino_graph",
+    "clip_avg", "clip_max",
     "bag_of_texts", "bag_of_objects", "ot_gw",
 ]
 
+# im2graph + graph2graph: score fn returns (pred_pos, pred_room) directly from nodes
+IM2GRAPH_METHODS = {"clip_avg", "clip_max", "bag_of_texts", "bag_of_objects", "ot_gw"}
+
 GRAPH2GRAPH_METHODS = {"bag_of_texts", "bag_of_objects", "ot_gw"}
 
-IM2IM_DINO_METHODS  = {"dino_cls", "dino_vlad", "snap_loc", "dino_graph"}
+IM2IM_DINO_METHODS  = {"dino_cls", "dino_vlad", "snap_loc"}
 IM2IM_CLIP_METHODS  = {"clip_cls", "clip_vlad", "clip_avg", "clip_max",
                         "bag_of_texts", "bag_of_objects", "ot_gw"}
 
@@ -110,73 +112,47 @@ def _l2norm(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 def build_db_node_index(db_traj: np.ndarray, graph: dict, window_m: float = 3.0) -> list[dict]:
     """
     For each DB frame, collect nearby scene-graph nodes (within window_m in XY).
+    Used only for SnapLoc graph re-scoring (snap_loc method).
 
     Returns a list of length N_db. Each entry is a dict:
-        {"clip_ft": (K, D) | None, "text_ft": (K, D_t) | None, "positions": (K, 3)}
-    Empty dicts indicate no nodes nearby.
+        {"clip_ft": (K, D) | None, "positions": (K, 3)}
     """
     nodes = graph.get("nodes", [])
     if len(nodes) == 0:
-        print("[WARN] Scene graph has no nodes — im2graph / graph2graph will be zero scores")
-        return [{"clip_ft": None, "text_ft": None, "positions": np.zeros((0, 3))}
+        return [{"clip_ft": None, "positions": np.zeros((0, 3))}
                 for _ in range(len(db_traj))]
 
-    node_pos = np.array([n["position"] for n in nodes], dtype=np.float32)  # (M, 3)
+    node_pos = np.array([n["position"] for n in nodes], dtype=np.float32)
     clip_fts  = [n.get("clip_ft") for n in nodes]
-    text_fts  = [n.get("text_ft") for n in nodes]
 
     result = []
-    for i, pos in enumerate(db_traj):
-        dists = np.linalg.norm(node_pos[:, :2] - pos[:2], axis=1)  # 2D XY distance
+    for pos in db_traj:
+        dists = np.linalg.norm(node_pos[:, :2] - pos[:2], axis=1)
         mask  = dists <= window_m
-
-        nearby_clip = None
-        nearby_text = None
         nearby_pos  = node_pos[mask]
-
         valid_clip = [np.asarray(clip_fts[j], dtype=np.float32)
                       for j in np.where(mask)[0] if clip_fts[j] is not None]
-        valid_text = [np.asarray(text_fts[j], dtype=np.float32)
-                      for j in np.where(mask)[0] if text_fts[j] is not None]
-
-        if valid_clip:
-            nearby_clip = _l2norm(np.stack(valid_clip, axis=0))
-        if valid_text:
-            nearby_text = _l2norm(np.stack(valid_text, axis=0))
-
-        result.append({"clip_ft": nearby_clip, "text_ft": nearby_text,
-                        "positions": nearby_pos})
+        nearby_clip = _l2norm(np.stack(valid_clip, axis=0)) if valid_clip else None
+        result.append({"clip_ft": nearby_clip, "positions": nearby_pos})
 
     return result
 
 
-def precompute_db_clip_aggregates(db_node_index: list[dict]) -> tuple[np.ndarray, list]:
+def precompute_db_clip_avg(db_node_index: list[dict]) -> np.ndarray:
     """
-    Returns:
-        db_clip_avg : (N_db, D) — mean clip_ft per DB frame (zeros where no nodes)
-        db_clip_stack: list[np.ndarray | None] — raw (K,D) per DB frame for CLIP-Max
+    Returns db_clip_avg : (N_db, D) — mean clip_ft per DB frame (zeros where no nodes).
+    Used only for SnapLoc graph re-scoring.
     """
     first_clip = next((e["clip_ft"] for e in db_node_index if e["clip_ft"] is not None), None)
     D = first_clip.shape[-1] if first_clip is not None else 1
 
-    db_clip_avg   = np.zeros((len(db_node_index), D), dtype=np.float32)
-    db_clip_stack = []
-
+    db_clip_avg = np.zeros((len(db_node_index), D), dtype=np.float32)
     for i, entry in enumerate(db_node_index):
         cf = entry["clip_ft"]
         if cf is not None and len(cf) > 0:
             db_clip_avg[i] = cf.mean(axis=0)
-            db_clip_stack.append(cf)
-        else:
-            db_clip_stack.append(None)
 
-    db_clip_avg = _l2norm(db_clip_avg)
-    return db_clip_avg, db_clip_stack
-
-
-def precompute_db_text_stack(db_node_index: list[dict]) -> list:
-    """Returns list[np.ndarray | None] — raw (K, D_text) text embeddings per DB frame."""
-    return [e["text_ft"] for e in db_node_index]
+    return _l2norm(db_clip_avg)
 
 
 # ── YOLO cache ────────────────────────────────────────────────────────────────
@@ -191,7 +167,6 @@ def load_or_build_yolo_cache(
     Build (or load from cache) YOLO detections for every query timestep.
 
     Cache format: {t: [{"class_name": str, "clip_ft": (D,), "bbox_norm": (4,)}, ...]}
-
     Returns None if yolo_model is None.
     """
     if yolo_model is None:
@@ -233,7 +208,8 @@ def load_or_build_yolo_cache(
                 if clip_emb is None:
                     continue
 
-                class_name = yolo_model.class_names[cid] if cid < len(yolo_model.class_names) else "object"
+                class_name = (yolo_model.class_names[cid]
+                              if cid < len(yolo_model.class_names) else "object")
                 detections_at_t.append({
                     "class_name": class_name,
                     "clip_ft":    clip_emb[0].astype(np.float32),
@@ -253,24 +229,8 @@ def load_or_build_yolo_cache(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Score functions
+# OT helper (module-level, no closures)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def _score_im2graph_avg(query_emb: np.ndarray, db_clip_avg: np.ndarray) -> np.ndarray:
-    """query_emb: (D,); db_clip_avg: (N_db, D) → (N_db,) scores."""
-    q = _l2norm(query_emb[None])[0]
-    return db_clip_avg @ q
-
-
-def _score_im2graph_max(query_emb: np.ndarray, db_clip_stack: list) -> np.ndarray:
-    """Max cosine similarity of query_emb against all nearby node embeddings per DB frame."""
-    q = _l2norm(query_emb[None])[0]
-    scores = np.zeros(len(db_clip_stack), dtype=np.float32)
-    for i, cf in enumerate(db_clip_stack):
-        if cf is not None and len(cf) > 0:
-            scores[i] = float((cf @ q).max())
-    return scores
-
 
 def _ot_score(src_embs: np.ndarray, dst_embs: np.ndarray, reg: float = 0.05) -> float:
     """
@@ -287,8 +247,7 @@ def _ot_score(src_embs: np.ndarray, dst_embs: np.ndarray, reg: float = 0.05) -> 
     p = np.ones(n, dtype=np.float64) / n
     q = np.ones(m, dtype=np.float64) / m
 
-    # Cost matrix: semantic dissimilarity
-    sim = _l2norm(src_embs) @ _l2norm(dst_embs).T   # (n, m)
+    sim = _l2norm(src_embs) @ _l2norm(dst_embs).T
     M   = np.clip(1.0 - sim, 0.0, 2.0).astype(np.float64)
 
     try:
@@ -296,19 +255,12 @@ def _ot_score(src_embs: np.ndarray, dst_embs: np.ndarray, reg: float = 0.05) -> 
     except Exception:
         cost = 1.0
 
-    return -cost   # negate: higher score = lower OT cost = better match
+    return -cost
 
 
-def _gw_score(
-    query_dets: list[dict],
-    db_node_entry: dict,
-    reg: float = 0.05,
-) -> float:
+def _gw_score(query_dets: list[dict], db_node_entry: dict, reg: float = 0.05) -> float:
     """
-    Gromov-Wasserstein score between query detection graph and DB subgraph.
-
-    Query graph: detections at time T, distances = L2 in normalised bbox-center space.
-    DB graph   : scene-graph nodes, distances = 2D Euclidean in XY world space.
+    Gromov-Wasserstein score between query detection graph and a node subgraph.
     Returns negative GW cost (higher = more structurally similar).
     """
     if pot is None:
@@ -318,7 +270,6 @@ def _gw_score(
     if node_pos is None or len(node_pos) == 0 or len(query_dets) == 0:
         return 0.0
 
-    # ── Query intra-graph distance matrix (bbox centres in [0,1]^2) ──
     centers_q = np.array([
         [(d["bbox_norm"][0] + d["bbox_norm"][2]) / 2,
          (d["bbox_norm"][1] + d["bbox_norm"][3]) / 2]
@@ -328,7 +279,6 @@ def _gw_score(
     D_q = np.linalg.norm(centers_q[:, None] - centers_q[None, :], axis=-1).astype(np.float64)
     D_q /= D_q.max() + 1e-12
 
-    # ── DB intra-graph distance matrix (2D XY world) ──
     pos2d = node_pos[:, :2].astype(np.float64)
     m = len(pos2d)
     D_db = np.linalg.norm(pos2d[:, None] - pos2d[None, :], axis=-1)
@@ -347,42 +297,6 @@ def _gw_score(
     return -gw_cost
 
 
-def _snap_loc_rescore(
-    vlad_scores: np.ndarray,
-    t: int,
-    ts: np.ndarray,
-    siglip_encoded: dict,
-    db_clip_avg: np.ndarray,
-    alpha: float,
-    top_k_candidates: int = 100,
-) -> np.ndarray:
-    """
-    SnapLoc: combine DinoVLAD image scores with SigLIP im2graph scores.
-    Only re-scores the top_k_candidates from image retrieval for speed.
-    """
-    scores = vlad_scores.copy()
-
-    # Query SigLIP embedding at t
-    X_siglip = siglip_encoded["clip_cls"]["X"][siglip_encoded["clip_cls"]["ts"] == t]
-    if len(X_siglip) == 0:
-        return scores
-
-    q_clip = _l2norm(X_siglip.mean(axis=0)[None])[0]   # aggregate views
-
-    # Graph re-score (avg mode) only for top candidates
-    top_candidates = np.argsort(-vlad_scores)[:top_k_candidates]
-    graph_s = np.zeros(len(vlad_scores), dtype=np.float32)
-    graph_s[top_candidates] = (db_clip_avg[top_candidates] @ q_clip)
-
-    # Normalise each component to [0,1] before blending
-    def _minmax(x):
-        lo, hi = x.min(), x.max()
-        return (x - lo) / (hi - lo + 1e-12)
-
-    scores = (1 - alpha) * _minmax(vlad_scores) + alpha * _minmax(graph_s)
-    return scores
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main experiment runner
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -393,55 +307,91 @@ def run_experiment(args):
     with open(args.dataset, "rb") as f:
         dataset = pkl.load(f)
 
-    db_traj          = np.array(dataset["db_traj"])       # (N_db, 3)
-    query_traj       = np.array(dataset["query_traj"])    # (T, 3)
-    db_room_labels   = dataset.get("db_room_labels", ["unknown"] * len(db_traj))
+    db_traj           = np.array(dataset["db_traj"])       # (N_db, 3)
+    query_traj        = np.array(dataset["query_traj"])    # (T, 3)
+    db_room_labels    = dataset.get("db_room_labels",    ["unknown"] * len(db_traj))
     query_room_labels = dataset.get("query_room_labels", ["unknown"] * len(query_traj))
-    ts               = np.array(dataset["ts"])
-    T                = int(ts[-1]) + 1
+    ts                = np.array(dataset["ts"])
+    T                 = int(ts[-1]) + 1
+
+    # Build fast GT lookup: timestep t → set of matching DB frame indices
+    ground_truth = dataset.get("ground_truth")
+    gt_sets: dict[int, set] = {}
+    if ground_truth is not None:
+        for row in ground_truth:
+            gt_sets[int(row[0])] = set(int(i) for i in row[1])
 
     print(f"  DB frames  : {len(db_traj)}")
     print(f"  Query steps: {T}")
 
-    graph = {}
+    # ── 2. Load scene graph ───────────────────────────────────────────────────
+    graph: dict = {}
     if args.graph:
         print(f"Loading scene graph from {args.graph} …")
         graph = load_scene_graph(args.graph)
         print(f"  Nodes: {len(graph.get('nodes', []))}  Edges: {len(graph.get('edges', []))}")
 
-    # ── 2. Decide which methods to run ────────────────────────────────────────
-    requested = set(ALL_METHODS if "all" in args.methods else args.methods)
+    # Flatten ALL graph nodes for im2graph / graph2graph scoring
+    all_clip_nodes = [n for n in graph.get("nodes", []) if n.get("clip_ft") is not None]
+    all_text_nodes = [n for n in graph.get("nodes", []) if n.get("text_ft") is not None]
+
+    all_node_clip_ft = (
+        _l2norm(np.stack([n["clip_ft"] for n in all_clip_nodes], axis=0).astype(np.float32))
+        if all_clip_nodes else np.zeros((0, 1), dtype=np.float32)
+    )  # (N, D_clip)
+    all_node_text_ft = (
+        _l2norm(np.stack([n["text_ft"] for n in all_text_nodes], axis=0).astype(np.float32))
+        if all_text_nodes else np.zeros((0, 1), dtype=np.float32)
+    )  # (M, D_text)
+    all_node_clip_pos = (
+        np.stack([n["position"] for n in all_clip_nodes], axis=0).astype(np.float32)
+        if all_clip_nodes else np.zeros((0, 3), dtype=np.float32)
+    )  # (N, 3)
+    all_node_text_pos = (
+        np.stack([n["position"] for n in all_text_nodes], axis=0).astype(np.float32)
+        if all_text_nodes else np.zeros((0, 3), dtype=np.float32)
+    )  # (M, 3)
+    all_node_clip_rooms = [n.get("room", "unknown") for n in all_clip_nodes]
+    all_node_text_rooms = [n.get("room", "unknown") for n in all_text_nodes]
+
+    if all_clip_nodes:
+        print(f"  Node clip_ft arrays: {len(all_clip_nodes)} nodes, dim={all_node_clip_ft.shape[-1]}")
+    if all_text_nodes:
+        print(f"  Node text_ft arrays: {len(all_text_nodes)} nodes, dim={all_node_text_ft.shape[-1]}")
+
+    # ── 3. Decide which methods to run ────────────────────────────────────────
+    requested    = set(ALL_METHODS if "all" in args.methods else args.methods)
     needs_dino   = bool(requested & IM2IM_DINO_METHODS)
     needs_siglip = bool(requested & IM2IM_CLIP_METHODS)
-    needs_graph  = bool(requested & ({"clip_avg", "clip_max", "dino_graph",
-                                       "snap_loc"} | GRAPH2GRAPH_METHODS))
+    needs_graph  = bool(requested & ({"clip_avg", "clip_max", "snap_loc"} | GRAPH2GRAPH_METHODS))
     needs_yolo   = bool(requested & GRAPH2GRAPH_METHODS)
 
-    # ── 3. Load models ────────────────────────────────────────────────────────
-    dino   = DinoModel(cfg)   if needs_dino   else None
-    siglip = SiglipModel(cfg) if needs_siglip else None
-    yolo   = YOLODetector(cfg) if needs_yolo  else None
+    # ── 4. Load models ────────────────────────────────────────────────────────
+    dino   = DinoModel(cfg)    if needs_dino   else None
+    siglip = SiglipModel(cfg)  if needs_siglip else None
+    yolo   = YOLODetector(cfg) if needs_yolo   else None
 
-    # ── 4. Pre-compute im2im embeddings ───────────────────────────────────────
+    # ── 5. Pre-compute im2im embeddings ───────────────────────────────────────
     db_images    = dataset["db_images"]
     query_images = dataset["query_images"]
 
     dino_methods = {}
     if needs_dino:
-        if "dino_cls" in requested or "dino_graph" in requested:
-            dino_methods["dino_cls"]  = {"patches": False, "agg_method": "gap", "num_clusters": 32, "grayscale": False}
+        if "dino_cls" in requested:
+            dino_methods["dino_cls"]  = {"patches": False, "agg_method": "gap",  "num_clusters": 32, "grayscale": False}
         if "dino_vlad" in requested or "snap_loc" in requested:
             dino_methods["dino_vlad"] = {"patches": True,  "agg_method": "vlad", "num_clusters": 32, "grayscale": False}
 
     clip_methods = {}
     if needs_siglip:
-        if "clip_cls" in requested or "clip_avg" in requested or "clip_max" in requested \
-                or "bag_of_objects" in requested or "bag_of_texts" in requested or "ot_gw" in requested:
-            clip_methods["clip_cls"]  = {"patches": False, "agg_method": "gap", "num_clusters": 32, "grayscale": False}
+        if any(m in requested for m in ("clip_cls", "clip_avg", "clip_max",
+                                         "bag_of_objects", "bag_of_texts",
+                                         "ot_gw", "snap_loc")):
+            clip_methods["clip_cls"]  = {"patches": False, "agg_method": "gap",  "num_clusters": 32, "grayscale": False}
         if "clip_vlad" in requested:
             clip_methods["clip_vlad"] = {"patches": True,  "agg_method": "vlad", "num_clusters": 32, "grayscale": False}
 
-    dino_encoded = {}
+    dino_encoded: dict = {}
     if dino_methods:
         print("Pre-computing DINO embeddings …")
         dino_encoded = prepare_embeddings(
@@ -449,7 +399,7 @@ def run_experiment(args):
             methods=dino_methods, ts=ts, cropping=False, grayscale=False,
         )
 
-    siglip_encoded = {}
+    siglip_encoded: dict = {}
     if clip_methods:
         print("Pre-computing SigLIP embeddings …")
         siglip_encoded = prepare_embeddings(
@@ -457,101 +407,164 @@ def run_experiment(args):
             methods=clip_methods, ts=ts, cropping=False, grayscale=False,
         )
 
-    # ── 5. Build DB → graph node index ────────────────────────────────────────
-    db_node_index = []
-    db_clip_avg   = None
-    db_clip_stack = None
-    db_text_stack = None
-
-    if needs_graph and graph.get("nodes"):
-        print("Building DB frame → scene-graph node index …")
+    # ── 6. Build SnapLoc db_clip_avg (DB-frame level, for graph re-scoring) ──
+    db_clip_avg: np.ndarray | None = None
+    if "snap_loc" in requested and graph.get("nodes"):
+        print("Building DB frame → scene-graph node index for SnapLoc …")
         db_node_index = build_db_node_index(db_traj, graph, window_m=args.graph_window)
-        db_clip_avg, db_clip_stack = precompute_db_clip_aggregates(db_node_index)
-        db_text_stack = precompute_db_text_stack(db_node_index)
-    elif needs_graph:
-        warnings.warn("Scene graph is empty — im2graph / graph2graph will return zero scores.")
-        db_node_index = [{"clip_ft": None, "text_ft": None, "positions": np.zeros((0,3))}
-                         for _ in range(len(db_traj))]
-        db_clip_avg   = np.zeros((len(db_traj), 1), dtype=np.float32)
-        db_clip_stack = [None] * len(db_traj)
-        db_text_stack = [None] * len(db_traj)
+        db_clip_avg   = precompute_db_clip_avg(db_node_index)
+    elif "snap_loc" in requested:
+        warnings.warn("Scene graph is empty — SnapLoc graph re-scoring will be zero.")
+        db_clip_avg = np.zeros((len(db_traj), 1), dtype=np.float32)
 
-    # ── 6. Build YOLO cache ────────────────────────────────────────────────────
-    yolo_cache = None
+    # ── 7. Build YOLO cache ────────────────────────────────────────────────────
+    yolo_cache: dict | None = None
     if needs_yolo:
         yolo_cache = load_or_build_yolo_cache(
             dataset, yolo, siglip,
             cache_path=args.yolo_cache or "",
         )
 
-    # ── 7. Register score functions ────────────────────────────────────────────
-    # Each function takes (t: int) and returns (N_db,) float32 scores.
+    # ── 8. Define closures ─────────────────────────────────────────────────────
 
-    ground_truth = dataset["ground_truth"]
+    def _predict_from_nodes(
+        scores: np.ndarray,
+        node_pos: np.ndarray,
+        node_rooms: list,
+        k: int = 10,
+    ):
+        """Softmax-weighted top-k node positions → (pred_pos (3,), pred_room str)."""
+        k = min(k, len(scores))
+        if k == 0:
+            return np.zeros(3, dtype=np.float32), "unknown"
+        top_k = np.argsort(-scores)[:k]
+        raw_w = scores[top_k] - scores[top_k].max()
+        w = np.exp(raw_w)
+        w /= w.sum() + 1e-12
+        pred_pos  = (w[:, None] * node_pos[top_k]).sum(axis=0)
+        pred_room = node_rooms[top_k[0]]
+        return pred_pos, pred_room
 
     def _im2im_score(encoded, method_key, t):
         scores, _, _ = localize_at_t(encoded, ground_truth, method_key, t, n_views=10)
         return np.array(scores, dtype=np.float32)
 
-    def _im2graph_score(t, mode: str, encoded_clip, encoded_dino) -> np.ndarray:
-        # Aggregate query embeddings at time t across all camera views
-        if mode in ("clip_avg", "clip_max"):
-            X = encoded_clip["clip_cls"]["X"][encoded_clip["clip_cls"]["ts"] == t]
-        else:  # dino_graph
-            X = encoded_dino["dino_cls"]["X"][encoded_dino["dino_cls"]["ts"] == t]
+    def _snap_loc_rescore(vlad_scores: np.ndarray, t: int) -> np.ndarray:
+        """SnapLoc: DinoVLAD scores blended with SigLIP im2graph scores over DB frames."""
+        if db_clip_avg is None:
+            return vlad_scores
 
+        X = siglip_encoded["clip_cls"]["X"][siglip_encoded["clip_cls"]["ts"] == t]
         if len(X) == 0:
-            return np.zeros(len(db_traj), dtype=np.float32)
+            return vlad_scores
 
-        q = _l2norm(X.mean(axis=0)[None])[0]
+        q_clip = _l2norm(X.mean(axis=0)[None])[0]
+
+        top_candidates = np.argsort(-vlad_scores)[:100]
+        graph_s = np.zeros(len(vlad_scores), dtype=np.float32)
+        graph_s[top_candidates] = db_clip_avg[top_candidates] @ q_clip
+
+        def _minmax(x):
+            lo, hi = x.min(), x.max()
+            return (x - lo) / (hi - lo + 1e-12)
+
+        return (1 - args.snap_alpha) * _minmax(vlad_scores) + args.snap_alpha * _minmax(graph_s)
+
+    def _im2graph_score(t: int, mode: str):
+        """
+        Compare query SigLIP CLS against ALL scene-graph node clip_ft.
+        Returns (pred_pos (3,), pred_room str).
+        """
+        if len(all_node_clip_ft) == 0:
+            return np.zeros(3, dtype=np.float32), "unknown"
+
+        enc = siglip_encoded.get("clip_cls")
+        if enc is None:
+            return np.zeros(3, dtype=np.float32), "unknown"
+        X = enc["X"][enc["ts"] == t]
+        if len(X) == 0:
+            return np.zeros(3, dtype=np.float32), "unknown"
 
         if mode == "clip_avg":
-            return _score_im2graph_avg(q, db_clip_avg)
-        elif mode == "clip_max":
-            return _score_im2graph_max(q, db_clip_stack)
-        else:  # dino_graph — cross modal
-            return _score_im2graph_avg(q, db_clip_avg)
+            q = _l2norm(X.mean(axis=0)[None])[0]
+            scores = (all_node_clip_ft @ q).astype(np.float32)       # (N_nodes,)
+        else:  # clip_max
+            sims   = np.array(cosine_similarity_jax(X, all_node_clip_ft))  # (V, N_nodes)
+            scores = sims.max(axis=0).astype(np.float32)               # (N_nodes,)
 
-    def _graph2graph_score(t, mode: str) -> np.ndarray:
+        return _predict_from_nodes(scores, all_node_clip_pos, all_node_clip_rooms, k=args.top_k)
+
+    def _graph2graph_score(t: int, mode: str):
+        """
+        YOLO detections vs ALL scene-graph nodes via OT.
+        Returns (pred_pos (3,), pred_room str).
+        """
         if yolo_cache is None:
-            return np.zeros(len(db_traj), dtype=np.float32)
-
+            return np.zeros(3, dtype=np.float32), "unknown"
         dets = yolo_cache.get(t, [])
         if len(dets) == 0:
-            return np.zeros(len(db_traj), dtype=np.float32)
-
-        scores = np.zeros(len(db_traj), dtype=np.float32)
+            return np.zeros(3, dtype=np.float32), "unknown"
 
         if mode == "bag_of_objects":
-            src_embs = np.stack([d["clip_ft"] for d in dets], axis=0)
-            for i, dst_cf in enumerate(db_clip_stack):
-                scores[i] = _ot_score(src_embs, dst_cf)
+            if len(all_node_clip_ft) == 0:
+                return np.zeros(3, dtype=np.float32), "unknown"
+            src_embs = _l2norm(np.stack([d["clip_ft"] for d in dets], axis=0))  # (K, D)
+            # Full OT plan: query crops vs all nodes; per-node score = weighted transport mass
+            C = np.clip(1.0 - (src_embs @ all_node_clip_ft.T), 0.0, 2.0).astype(np.float64)
+            p = np.ones(len(src_embs), dtype=np.float64) / len(src_embs)
+            q = np.ones(len(all_node_clip_ft), dtype=np.float64) / len(all_node_clip_ft)
+            try:
+                T_ot   = pot.sinkhorn(p, q, C, reg=0.05)
+                # Per-node relevance: negative weighted OT cost (lower cost = higher relevance)
+                scores = -np.array((T_ot * C).sum(axis=0), dtype=np.float32)
+            except Exception:
+                scores = (src_embs @ all_node_clip_ft.T).mean(axis=0).astype(np.float32)
+            return _predict_from_nodes(scores, all_node_clip_pos, all_node_clip_rooms, k=args.top_k)
 
         elif mode == "bag_of_texts":
+            if len(all_node_text_ft) == 0:
+                return np.zeros(3, dtype=np.float32), "unknown"
             class_names = list({d["class_name"] for d in dets})
-            if not class_names:
-                return scores
-            text_embs = siglip.embed_texts(class_names)   # (K, D_text)
-            if text_embs is None:
-                return scores
-            text_embs = _l2norm(text_embs)
-            for i, dst_tf in enumerate(db_text_stack):
-                scores[i] = _ot_score(text_embs, dst_tf)
+            text_embs = siglip.embed_texts(class_names)
+            if text_embs is None or len(text_embs) == 0:
+                return np.zeros(3, dtype=np.float32), "unknown"
+            text_embs = _l2norm(np.array(text_embs, dtype=np.float32))
+            C = np.clip(1.0 - (text_embs @ all_node_text_ft.T), 0.0, 2.0).astype(np.float64)
+            p = np.ones(len(text_embs), dtype=np.float64) / len(text_embs)
+            q = np.ones(len(all_node_text_ft), dtype=np.float64) / len(all_node_text_ft)
+            try:
+                T_ot   = pot.sinkhorn(p, q, C, reg=0.05)
+                scores = -np.array((T_ot * C).sum(axis=0), dtype=np.float32)
+            except Exception:
+                scores = (text_embs @ all_node_text_ft.T).mean(axis=0).astype(np.float32)
+            return _predict_from_nodes(scores, all_node_text_pos, all_node_text_rooms, k=args.top_k)
 
         elif mode == "ot_gw":
-            # Only score top-100 candidates from DinoVLAD for speed
+            if len(all_node_clip_ft) == 0:
+                return np.zeros(3, dtype=np.float32), "unknown"
+            # Pre-filter to top-100 nodes by DinoVLAD (for speed)
             if "dino_vlad" in dino_encoded:
                 pre_scores = np.array(_im2im_score(dino_encoded, "dino_vlad", t))
-                candidates = np.argsort(-pre_scores)[:100]
+                # Map DB-frame scores → node scores via spatial proximity
+                node_pre = np.zeros(len(all_node_clip_ft), dtype=np.float32)
+                for ni, npos in enumerate(all_node_clip_pos):
+                    dists   = np.linalg.norm(db_traj[:, :2] - npos[:2], axis=1)
+                    nearby  = np.where(dists <= args.graph_window)[0]
+                    node_pre[ni] = pre_scores[nearby].max() if len(nearby) else 0.0
+                candidates = np.argsort(-node_pre)[:100]
             else:
-                candidates = np.arange(len(db_traj))
+                candidates = np.arange(min(100, len(all_node_clip_ft)))
 
-            for i in candidates:
-                scores[i] = _gw_score(dets, db_node_index[i])
+            gw_scores = np.full(len(all_node_clip_ft), -1.0, dtype=np.float32)
+            for ni in candidates:
+                gw_scores[ni] = _gw_score(dets, {"positions": all_node_clip_pos[ni:ni+1]})
 
-        return scores
+            return _predict_from_nodes(gw_scores, all_node_clip_pos, all_node_clip_rooms, k=args.top_k)
 
-    method_fns = {}
+        return np.zeros(3, dtype=np.float32), "unknown"
+
+    # ── 9. Register method functions ───────────────────────────────────────────
+    method_fns: dict = {}
 
     if "dino_cls"  in requested: method_fns["dino_cls"]  = lambda t: _im2im_score(dino_encoded,   "dino_cls",  t)
     if "clip_cls"  in requested: method_fns["clip_cls"]  = lambda t: _im2im_score(siglip_encoded, "clip_cls",  t)
@@ -560,24 +573,19 @@ def run_experiment(args):
 
     if "snap_loc"  in requested:
         method_fns["snap_loc"] = lambda t: _snap_loc_rescore(
-            _im2im_score(dino_encoded, "dino_vlad", t),
-            t, ts, siglip_encoded, db_clip_avg,
-            alpha=args.snap_alpha,
+            _im2im_score(dino_encoded, "dino_vlad", t), t
         )
 
-    if "clip_avg"  in requested: method_fns["clip_avg"]  = lambda t: _im2graph_score(t, "clip_avg",  siglip_encoded, dino_encoded)
-    if "clip_max"  in requested: method_fns["clip_max"]  = lambda t: _im2graph_score(t, "clip_max",  siglip_encoded, dino_encoded)
-    if "dino_graph" in requested: method_fns["dino_graph"] = lambda t: _im2graph_score(t, "dino_graph", siglip_encoded, dino_encoded)
-
+    if "clip_avg"       in requested: method_fns["clip_avg"]       = lambda t: _im2graph_score(t, "clip_avg")
+    if "clip_max"       in requested: method_fns["clip_max"]       = lambda t: _im2graph_score(t, "clip_max")
     if "bag_of_objects" in requested: method_fns["bag_of_objects"] = lambda t: _graph2graph_score(t, "bag_of_objects")
     if "bag_of_texts"   in requested: method_fns["bag_of_texts"]   = lambda t: _graph2graph_score(t, "bag_of_texts")
     if "ot_gw"          in requested: method_fns["ot_gw"]          = lambda t: _graph2graph_score(t, "ot_gw")
 
-    # Warn about methods that couldn't be set up
     for m in requested - set(method_fns.keys()):
         print(f"[WARN] Method '{m}' could not be set up and will be skipped.")
 
-    # ── 8. Evaluation loop ────────────────────────────────────────────────────
+    # ── 10. Evaluation loop ───────────────────────────────────────────────────
     print(f"\nRunning evaluation over {T} timesteps × {len(method_fns)} methods …\n")
 
     per_t: dict[str, list[dict]] = {m: [] for m in method_fns}
@@ -587,22 +595,33 @@ def run_experiment(args):
     for t in tqdm(range(T), desc="Evaluation"):
         gt_pos  = query_traj[t]
         gt_room = query_room_labels[t] if t < len(query_room_labels) else "unknown"
+        gt_set  = gt_sets.get(t, set())
         gt_pos_list.append(gt_pos)
 
         for method, score_fn in method_fns.items():
-            scores = score_fn(t)
+            if method in IM2GRAPH_METHODS:
+                # Returns (pred_pos, pred_room) directly from node scoring
+                pred_pos, pred_room = score_fn(t)
+                scores = None   # R@K not applicable for im2graph/graph2graph
+            else:
+                # Returns (N_db,) scores → derive position + room from DB frames
+                scores    = score_fn(t)
+                pred_pos  = predict_position(scores, db_traj, k=args.top_k)
+                pred_room = (db_room_labels[int(np.argmax(scores))]
+                             if len(scores) > 0 else "unknown")
 
-            pred_pos  = predict_position(scores, db_traj, k=args.top_k)
-            pred_room = db_room_labels[int(np.argmax(scores))] if len(scores) > 0 else "unknown"
-
-            per_t[method].append(compute_loc_metrics(pred_pos, gt_pos, pred_room, gt_room))
+            metrics = compute_loc_metrics(
+                pred_pos, gt_pos, pred_room, gt_room,
+                scores=scores, gt_set=gt_set,
+            )
+            per_t[method].append(metrics)
             pred_positions[method].append(pred_pos)
 
-    # ── 9. Aggregate & print ──────────────────────────────────────────────────
+    # ── 11. Aggregate & print ─────────────────────────────────────────────────
     aggregated = {m: aggregate_results(per_t[m]) for m in method_fns}
     print(format_results_table(aggregated))
 
-    # ── 10. Save outputs ──────────────────────────────────────────────────────
+    # ── 12. Save outputs ──────────────────────────────────────────────────────
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -613,7 +632,7 @@ def run_experiment(args):
                   "gt_positions": gt_pos_list}, f)
     print(f"[saved] per-timestep data → {out / 'per_timestep.pkl'}")
 
-    # ── 11. Heatmaps (optional) ───────────────────────────────────────────────
+    # ── 13. Heatmaps (optional) ───────────────────────────────────────────────
     gt_arr = np.array(gt_pos_list)
     for method in method_fns:
         pred_arr = np.array(pred_positions[method])
@@ -655,11 +674,11 @@ def _parse_args():
                    choices=ALL_METHODS + ["all"],
                    help="Which methods to run. Pass 'all' for everything.")
     p.add_argument("--top_k",        type=int, default=10,
-                   help="Top-k DB positions for weighted-average position prediction")
+                   help="Top-k positions for weighted-average position prediction")
     p.add_argument("--graph_window", type=float, default=3.0,
-                   help="Spatial window (m) for associating DB frames with graph nodes")
+                   help="Spatial window (m) for SnapLoc DB-frame → node association")
     p.add_argument("--snap_alpha",   type=float, default=0.4,
-                   help="SnapLoc blending weight: alpha × graph_score + (1-alpha) × image_score")
+                   help="SnapLoc blend weight: alpha × graph_score + (1-alpha) × image_score")
     p.add_argument("--output_dir",   default="results",
                    help="Directory to save results.csv, heatmaps, per_timestep.pkl")
     return p.parse_args()

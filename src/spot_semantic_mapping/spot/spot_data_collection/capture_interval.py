@@ -310,6 +310,7 @@ def dataset_loop(image_client, robot_state_client, outdir, interval):
 def main():
     parser = argparse.ArgumentParser()
     bosdyn.client.util.add_base_arguments(parser)
+    # parser.add_argument("--hostname", default="hostname", help="hostname of the Spot robot")
     parser.add_argument("--outdir", default="spot_dataset", help="Dataset directory")
     parser.add_argument("--interval", type=float, default=2.0, help="Capture interval (s)")
     options = parser.parse_args()

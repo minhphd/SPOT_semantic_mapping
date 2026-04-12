@@ -12,3 +12,4 @@ docker run --rm -it \
 source /opt/ros/humble/setup.bash
 pip install -U jax[cuda12] accelerate
 python3 -m pip install bosdyn-client bosdyn-mission bosdyn-choreography-client
+pip install -e .

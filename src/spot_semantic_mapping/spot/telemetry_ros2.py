@@ -3,11 +3,12 @@ import asyncio
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 from sensor_msgs.msg import Image, BatteryState
 from geometry_msgs.msg import PoseStamped, TwistStamped
-from agent import SpotAgent
+from agent import SpotAgent, SpotAgentGraph
 from sensor_msgs.msg import Image as RosImage
+from configs.loader import cfg
 
 def np_to_ros_image(img_np, frame_id, stamp, encoding="bgr8"):
     msg = RosImage()
@@ -50,6 +51,7 @@ class SpotObservationPublisher(Node):
 
         # --- pubs ---
         self.pub_pose = self.create_publisher(PoseStamped, "/spot/pose", 10)
+        self.pub_graph = self.create_publisher(String, "/spot/graph", 10)
         self.pub_twist = self.create_publisher(TwistStamped, "/spot/twist", 10)
         self.pub_batt = self.create_publisher(BatteryState, "/spot/battery", 10)
         self.pub_img = {}   # topic -> publisher
@@ -155,6 +157,15 @@ class SpotObservationPublisher(Node):
         self.pub_pose.publish(pose)
 
         # ----------------
+        # Graph
+        # ----------------
+        if 'graph' in obs:
+            text_desc = obs['g_text_desc']
+            msg = String()
+            msg.data = text_desc  # Assign your Python string to the 'data' field
+            self.pub_graph.publish(msg)
+            
+        # ----------------
         # Cameras
         # ----------------
         cams = obs.get("cameras", {})        
@@ -185,7 +196,8 @@ def main():
 
     # ---- create your SpotAgent here ----
     # from your_module import SpotAgent
-    agent = SpotAgent(hostname="137.146.188.170")
+    # agent = SpotAgent(hostname="137.146.188.170")
+    agent = SpotAgentGraph(cfg, hostname="137.146.188.170")
 
     node = SpotObservationPublisher(agent, publish_rate_hz=5.0)
     rclpy.spin(node)

@@ -25,7 +25,7 @@ class ImageEncoder:
         self.domain_vlad_centers = None 
             
     def embed(self, images, patches=True, agg_method="vlad",
-            num_clusters=16, num_domains=6, seed=42, eps=1e-12, load=True, save=True, grayscale=False):
+            num_clusters=16, num_domains=6, seed=42, eps=1e-12, save_path=None, save=True, grayscale=False):
         """
         - agg_method: Options: "vlad", "domain_vlad", "gmp", "gap", "gem". 
         - num_domains: Number of distinct environments to cluster for "domain_vlad" (default 6 based on paper).
@@ -33,24 +33,26 @@ class ImageEncoder:
         
         # --- CACHE CHECKING ---
         cache_path = f"VPR_im2im/cache/{agg_method}_embeddings"
-        if agg_method == "vlad" and os.path.exists(cache_path + ".pkl") and load:
-            print(f"Loading cached VLAD data from {cache_path}.pkl...")
-            with open(cache_path + ".pkl", "rb") as f:
-                vlad_data = pkl.load(f)
-            self.vlad_centers = vlad_data["centers"]
-            return vlad_data["embeddings"]
+        if save_path != None:
+            print("save path not None: ", save_path)
+            if agg_method == "vlad":
+                print(f"Loading cached VLAD data from {cache_path}.pkl...")
+                with open(save_path, "rb") as f:
+                    vlad_data = pkl.load(f)
+                self.vlad_centers = vlad_data["centers"]
+                return vlad_data["embeddings"]
+                
+            elif agg_method == "domain_vlad":
+                print(f"Loading cached domain VLAD data from {cache_path}.pkl...")
+                with open(save_path, "rb") as f:
+                    domain_data = pkl.load(f)
+                self.domain_pca = domain_data["pca"]
+                self.domain_classifier = domain_data["classifier"]
+                self.domain_vlad_centers = domain_data["domain_centers"]
+                return domain_data["embeddings"]
             
-        elif agg_method == "domain_vlad" and os.path.exists(cache_path + ".pkl") and load:
-            print(f"Loading cached domain VLAD data from {cache_path}.pkl...")
-            with open(cache_path + ".pkl", "rb") as f:
-                domain_data = pkl.load(f)
-            self.domain_pca = domain_data["pca"]
-            self.domain_classifier = domain_data["classifier"]
-            self.domain_vlad_centers = domain_data["domain_centers"]
-            return domain_data["embeddings"]
-            
-        elif agg_method in ["gmp", "gap", "gem"] and os.path.exists(cache_path + ".npy") and load:
-            return np.load(cache_path + ".npy")
+            elif agg_method in ["gmp", "gap", "gem"] and os.path.exists(cache_path + ".npy"):
+                return np.load(cache_path + ".npy")
         
         # --- 1) EXTRACT FEATURES ---
         

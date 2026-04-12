@@ -223,3 +223,4 @@ configs/api_keys.ini
 configs/spot_credentials.json
 *.pkl
 *.npy
+*.pt

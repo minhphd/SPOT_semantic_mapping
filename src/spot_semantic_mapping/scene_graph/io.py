@@ -1,16 +1,145 @@
+"""
+Scene Graph Checkpoint Loading & Tracker Restoration
+====================================================
+
+This module restores a full 3D semantic scene graph tracker from a saved
+checkpoint directory. It reconstructs:
+
+• ObjectTracker3D state
+• All persistent MapObject instances
+• Geometric point clouds
+• Axis-aligned bounding boxes
+• CLIP feature embeddings
+• Multi-view crop history
+• Relation edges
+• Resume frame index for continued processing
+
+Designed for long-running embodied scene graph pipelines where incremental
+checkpointing and crash recovery are required.
+
+---------------------------------------------------------------------
+
+Checkpoint Directory Structure
+-------------------------------
+
+<checkpoint_dir>/
+├── tracker_meta.json
+├── objects/
+│   ├── obj_0001/
+│   │   ├── points.npy
+│   │   ├── bbox.npy
+│   │   ├── clip_ft.npy
+│   │   ├── meta.json
+│   │   ├── crop_000.pkl
+│   │   └── ...
+│   └── obj_0002/
+│       └── ...
+└── ...
+
+tracker_meta.json contains:
+    - last_frame_idx
+    - tracking_params
+    - serialized edges
+
+---------------------------------------------------------------------
+
+What Gets Restored
+------------------
+
+Objects:
+    • 3D geometry (Open3D point cloud)
+    • Bounding box
+    • CLIP embedding
+    • Multi-view crop memory
+    • Object ID
+    • Class metadata
+
+Edges:
+    • Source / destination IDs
+    • Relation type
+    • Score
+    • Spatial distance
+
+Tracker:
+    • Matching thresholds
+    • Weight parameters (w_geo, w_sem, etc.)
+    • Center distance threshold
+    • Class gating configuration
+
+---------------------------------------------------------------------
+
+Important Notes
+---------------
+
+• Detection history is NOT restored (detections are ephemeral).
+• Objects are restored as MapObject instances.
+• Resume index is returned to continue frame processing safely.
+• This module assumes compatibility with ObjectTracker3D schema.
+
+---------------------------------------------------------------------
+
+Primary Functions
+-----------------
+
+load_full_tracker(checkpoint_dir, logger)
+    Rebuild complete tracker and return:
+        (tracker, resume_frame_idx)
+
+load_single_map_object(path)
+    Reconstruct a MapObject from saved geometry + metadata.
+
+load_scene_graph(graph_path)
+    Load exported JSON scene graph.
+
+---------------------------------------------------------------------
+
+Use Case
+--------
+
+• Crash-safe long sequences
+• Large indoor reconstruction pipelines
+• Resume training/inference
+• Multi-hour robotic mapping sessions
+• Experiment reproducibility
+
+---------------------------------------------------------------------
+
+Dependencies
+------------
+
+• Open3D
+• NumPy
+• PyTorch
+• JSON
+• pickle
+• spot_semantic_mapping modules
+
+---------------------------------------------------------------------
+
+Research Context
+----------------
+
+This checkpoint mechanism enables scalable, incremental construction of
+3D semantic world models without requiring full reprocessing from scratch.
+It is essential for embodied AI systems operating over long time horizons.
+"""
+
 import os
-import sys
-import time
 import json
-import logging
+import open3d as o3d
 import numpy as np
 import torch
-from logging.handlers import RotatingFileHandler
-from Model.tracker import Detection, ObjectTracker3D, MapObjectList, MapObject
-import open3d as o3d
-from Model.relations import RelationEdge
-import shutil
 import pickle
+
+from spot_semantic_mapping.scene_graph.utils.graph_tracker import Detection, ObjectTracker3D, MapObjectList, MapObject
+from spot_semantic_mapping.scene_graph.utils.relations_tracker import RelationEdge
+
+
+def load_scene_graph(graph_path):
+    with open(graph_path, 'rb') as fp:
+        graph = json.load(fp)
+
+    return graph
 
 
 def load_full_tracker(checkpoint_dir, logger):

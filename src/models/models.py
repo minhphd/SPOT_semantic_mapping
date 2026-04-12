@@ -286,7 +286,7 @@ class SiglipModel():
             img_size   = self.model.config.vision_config.image_size
             n = img_size // patch_size
             # last_hidden_state: (B, 1 + n*n, D) — index 0 is CLS, rest are patches
-            patch_feats = vision_outputs.last_hidden_state[:, 1:, :]   # (B, n*n, D)
+            patch_feats = vision_outputs.last_hidden_state    # (B, n*n, D)
             patch_feats = patch_feats.unflatten(1, (n, n))             # (B, n, n, D)
 
         patch_feats = patch_feats / (patch_feats.norm(dim=-1, keepdim=True) + 1e-12)

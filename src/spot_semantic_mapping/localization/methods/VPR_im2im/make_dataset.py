@@ -151,13 +151,15 @@ def load_spot_data(spot_ds_path="dataset/spot/millerst/data",
             # so cdist doesn't crash and the array indices stay perfectly aligned.
             query_coords.append([np.inf, np.inf, np.inf])
 
-    res["query_traj"] = np.array(query_coords)
+    query_coords = np.array(query_coords)
+    db_coords = np.array(db_coords)
+    res["query_traj"] = query_coords
     res["query_images"] = np.array(res["query_images"])
     # ==========================================
     # 4. Compute Ground Truth Matrix
     # ==========================================
     if len(query_coords) > 0 and len(db_coords) > 0:
-        distances = cdist(query_coords, db_coords, metric='euclidean')
+        distances = cdist(query_coords, db_coords)
         boolean_gt = distances <= window_size  
         
         gt_list = []

@@ -187,12 +187,12 @@ def main():
     )
     parser.add_argument(
         "--spot_ds_path",
-        default="dataset/spot/millerst/data",
+        default="data/spot/millerst/data",
         help="Path to the query SpotDataset directory (default: %(default)s)",
     )
     parser.add_argument(
         "--db_path",
-        default="dataset/3578aa5730",
+        default="data/iphone/3578aa5730",
         help="Path to the DB traversal directory (default: %(default)s)",
     )
     parser.add_argument(
